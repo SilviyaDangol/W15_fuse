@@ -12,6 +12,12 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"from urllib.request import urlopen; urlopen('http://localhost:8080/api/health/ready')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
 
   worker:
     build: .
@@ -24,6 +30,20 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+    restart: unless-stopped
+
+  ui:
+    build: .
+    command: streamlit run ui/streamlit_app.py --server.address 0.0.0.0 --server.port 8501
+    ports:
+      - "8501:8501"
+    environment:
+      # Internal Compose DNS; no browser or provider key is needed by this service.
+      API_BASE_URL: http://api:8080
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
 
   # Optional, GPU-only local LLM server. It starts only with --profile vllm.
   # The API gateway uses the same OpenAI-compatible chat-completions protocol.
@@ -68,6 +88,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+    restart: unless-stopped
 
 volumes:
   huggingface_cache:

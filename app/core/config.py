@@ -11,6 +11,15 @@ class Settings(BaseSettings):
     app_name: str = "Document Research Assistant"
     app_env: str = "development"
     redis_url: str = "redis://localhost:6379/0"
+    # Delivery controls are configuration, so they can be tuned without code changes.
+    chat_cache_ttl_seconds: int = 600
+    chat_rate_limit_per_minute: int = 20
+    upload_rate_limit_per_minute: int = 10
+    chat_batch_max_size: int = 10
+    # Cap concurrent upstream calls to protect a small vLLM server and API quota.
+    chat_batch_concurrency: int = 3
+    llm_retry_attempts: int = 3
+    llm_retry_base_delay_seconds: float = 0.5
     celery_task_always_eager: bool = False
     default_model_provider: str = "openai"
     openai_api_key: str | None = None

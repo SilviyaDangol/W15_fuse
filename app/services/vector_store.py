@@ -47,6 +47,7 @@ class VectorStore:
     def index_chunks(self, document_id: str, filename: str, chunks: Sequence[str]) -> int:
         if not chunks:
             return 0
+        # Embed the whole document batch in one request to reduce indexing round trips.
         embeddings = self._embed(list(chunks))
         ids = [f"{document_id}:{index}" for index in range(len(chunks))]
         metadata = [
@@ -60,6 +61,7 @@ class VectorStore:
         query = query.strip()
         if not query or self.collection.count() == 0:
             return []
+        # Retrieval happens before citations are created; models never invent source metadata.
         result = self.collection.query(
             query_embeddings=[self._embed([query])[0]],
             n_results=min(limit or self.settings.retrieval_top_k, self.collection.count()),

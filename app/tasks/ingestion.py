@@ -7,6 +7,7 @@ from docx import Document
 from app.core.config import get_settings
 from app.services.chunking import chunk_text
 from app.services.vector_store import VectorStore
+from app.services.reliability import bump_collection_version_sync
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,8 @@ def ingest_text_document(self, document_id: str, filename: str, file_path: str) 
         raise ValueError("The document contains no extractable text. Scanned PDFs need OCR support.")
     chunks = chunk_text(text, settings.chunk_size, settings.chunk_overlap)
     vectors_created = VectorStore(settings).index_chunks(document_id, filename, chunks)
+    # New vectors can change the best answer, so invalidate old answer keys by bumping the version.
+    collection_version = bump_collection_version_sync(settings)
     logger.info(
         "document_indexed document_id=%s filename=%s chunks=%s vectors=%s",
         document_id,
@@ -59,4 +62,5 @@ def ingest_text_document(self, document_id: str, filename: str, file_path: str) 
         "chunks_created": len(chunks),
         "vectors_created": vectors_created,
         "status": "indexed",
+        "collection_version": collection_version,
     }

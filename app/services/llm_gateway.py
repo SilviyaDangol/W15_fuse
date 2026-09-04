@@ -8,7 +8,7 @@ from litellm import acompletion
 from pydantic import ValidationError
 
 from app.core.config import Settings, get_settings
-from app.schemas.chat import AssistantAnswer, ToolUse
+from app.schemas.chat import GeneratedAnswer, ToolUse
 from app.services.vector_store import RetrievedChunk, VectorStore
 
 SYSTEM_PROMPT = """You are a precise document research assistant.
@@ -40,7 +40,7 @@ SEARCH_DOCUMENTS_TOOL = {
 
 
 class LLMGateway(Protocol):
-    async def answer(self, query: str, provider: str | None = None) -> AssistantAnswer: ...
+    async def answer(self, query: str, provider: str | None = None) -> GeneratedAnswer: ...
 
 
 class UnifiedLLMGateway:
@@ -56,7 +56,7 @@ class UnifiedLLMGateway:
         self.completion_fn = completion_fn or acompletion
         self.vector_store = vector_store
 
-    async def answer(self, query: str, provider: str | None = None) -> AssistantAnswer:
+    async def answer(self, query: str, provider: str | None = None) -> GeneratedAnswer:
         selected_provider = provider or self.settings.default_model_provider
         messages: list[dict] = [
             {"role": "developer", "content": SYSTEM_PROMPT},
@@ -155,12 +155,12 @@ def _response_format(provider: str) -> dict:
         "json_schema": {
             "name": "assistant_answer",
             "strict": True,
-            "schema": AssistantAnswer.model_json_schema(),
+            "schema": GeneratedAnswer.model_json_schema(),
         },
     }
 
 
-def _parse_model_answer(content: str, provider: str) -> AssistantAnswer:
+def _parse_model_answer(content: str, provider: str) -> GeneratedAnswer:
     """Validate strict OpenAI output; normalize unreliable compact vLLM metadata."""
     try:
         if provider == "vllm":
@@ -169,8 +169,8 @@ def _parse_model_answer(content: str, provider: str) -> AssistantAnswer:
                 raise ValueError("vLLM JSON did not contain a string answer.")
             # The application owns citations and tool history. Small local models
             # often emit wrong shapes here even in JSON mode, so never trust them.
-            return AssistantAnswer(answer=raw["answer"], sources=[], tool_uses=[])
-        return AssistantAnswer.model_validate_json(content)
+            return GeneratedAnswer(answer=raw["answer"], sources=[], tool_uses=[])
+        return GeneratedAnswer.model_validate_json(content)
     except (json.JSONDecodeError, ValidationError, ValueError, TypeError) as error:
         raise ValueError("Model returned an invalid structured response.") from error
 

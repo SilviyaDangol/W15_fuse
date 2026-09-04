@@ -2,18 +2,19 @@ from pathlib import Path
 from typing import Annotated
 from uuid import uuid4
 import logging
+import asyncio
 
 from celery.result import AsyncResult
-from fastapi import APIRouter, Body, Depends, File, HTTPException, UploadFile, status
-from openai import APIError
+from fastapi import APIRouter, Body, Depends, File, HTTPException, Request, UploadFile, status
 
-from app.api.dependencies import get_llm_gateway
+from app.api.dependencies import get_chat_service, get_redis_store
 from app.core.celery_app import celery_app
 from app.core.config import get_settings
-from app.schemas.chat import AssistantAnswer, ChatRequest
+from app.schemas.chat import AssistantAnswer, BatchChatItem, BatchChatRequest, BatchChatResponse, ChatRequest
 from app.schemas.documents import DocumentIngestionAccepted
 from app.schemas.jobs import DemoBatchRequest, JobCreated, JobStatus
-from app.services.llm_gateway import LLMGateway
+from app.services.reliability import ChatService, ProviderUnavailableError, RedisStore
+from app.services.vector_store import VectorStore
 from app.tasks.ingestion import ingest_text_document, process_demo_batch
 
 router = APIRouter()
@@ -24,6 +25,20 @@ SUPPORTED_DOCUMENT_EXTENSIONS = {".txt", ".md", ".docx", ".pdf"}
 @router.get("/health")
 async def health_check() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@router.get("/health/ready", summary="Check Redis and ChromaDB readiness")
+async def readiness_check(store: RedisStore = Depends(get_redis_store)) -> dict[str, str]:
+    # Do not declare the API ready until both delivery state and retrieval state are usable.
+    redis_ready = await store.ready()
+    try:
+        VectorStore().collection.count()
+        chroma_ready = True
+    except Exception:
+        chroma_ready = False
+    if not redis_ready or not chroma_ready:
+        raise HTTPException(status_code=503, detail="Required backing services are not ready.")
+    return {"status": "ready", "redis": "ok", "chromadb": "ok"}
 
 
 @router.get("/providers", summary="List available chat-provider values")
@@ -81,14 +96,44 @@ async def chat(
             }
         ),
     ],
-    gateway: LLMGateway = Depends(get_llm_gateway),
+    request: Request,
+    service: ChatService = Depends(get_chat_service),
+    store: RedisStore = Depends(get_redis_store),
 ) -> AssistantAnswer:
     """Generate a schema-validated answer through the configured model provider."""
+    await _enforce_limit(store, "chat", request, get_settings().chat_rate_limit_per_minute)
     try:
-        return await gateway.answer(payload.query, payload.provider)
-    except (ValueError, APIError) as error:
+        return await service.answer(payload)
+    except ProviderUnavailableError as error:
         logger.warning("chat_unavailable provider=%s error=%s", payload.provider, type(error).__name__)
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)) from error
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Selected provider is temporarily unavailable.") from error
+    except Exception as error:
+        logger.exception("chat_gateway_failure provider=%s error=%s", payload.provider, type(error).__name__)
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="The model gateway returned an invalid response.") from error
+
+
+@router.post("/chat/batch", response_model=BatchChatResponse, summary="Process up to 10 chat requests concurrently")
+async def chat_batch(
+    payload: BatchChatRequest,
+    request: Request,
+    service: ChatService = Depends(get_chat_service),
+    store: RedisStore = Depends(get_redis_store),
+) -> BatchChatResponse:
+    await _enforce_limit(store, "chat", request, get_settings().chat_rate_limit_per_minute, cost=len(payload.requests))
+    # asyncio keeps the endpoint responsive while this semaphore bounds upstream pressure.
+    semaphore = asyncio.Semaphore(get_settings().chat_batch_concurrency)
+
+    async def run_one(index: int, item: ChatRequest) -> BatchChatItem:
+        async with semaphore:
+            try:
+                return BatchChatItem(index=index, answer=await service.answer(item))
+            except ProviderUnavailableError:
+                return BatchChatItem(index=index, error="Selected provider is temporarily unavailable.")
+            except Exception:
+                logger.exception("batch_chat_failure index=%s", index)
+                return BatchChatItem(index=index, error="The model gateway returned an invalid response.")
+
+    return BatchChatResponse(results=await asyncio.gather(*(run_one(index, item) for index, item in enumerate(payload.requests))))
 
 
 @router.post("/documents/ingest", response_model=DocumentIngestionAccepted, status_code=status.HTTP_202_ACCEPTED)
@@ -96,9 +141,12 @@ async def upload_document(
     file: Annotated[
         UploadFile,
         File(description="Upload a UTF-8 .txt/.md, .docx, or text-based .pdf document (maximum 5 MB)."),
-    ]
+    ],
+    request: Request,
+    store: RedisStore = Depends(get_redis_store),
 ) -> DocumentIngestionAccepted:
     """Store a document and queue its extraction, embedding, and indexing work."""
+    await _enforce_limit(store, "upload", request, get_settings().upload_rate_limit_per_minute)
     extension = Path(file.filename).suffix.lower() if file.filename else ""
     if extension not in SUPPORTED_DOCUMENT_EXTENSIONS:
         accepted = ", ".join(sorted(SUPPORTED_DOCUMENT_EXTENSIONS))
@@ -115,10 +163,19 @@ async def upload_document(
     upload_dir = Path(get_settings().upload_dir)
     upload_dir.mkdir(parents=True, exist_ok=True)
     stored_path = upload_dir / f"{document_id}{extension}"
+    # Persist before queuing so the separate Celery process has a stable input file.
     stored_path.write_bytes(content)
     task = ingest_text_document.delay(document_id, file.filename, str(stored_path.resolve()))
     logger.info("document_queued document_id=%s filename=%s bytes=%s job_id=%s", document_id, file.filename, len(content), task.id)
     return DocumentIngestionAccepted(document_id=document_id, filename=file.filename, job_id=task.id)
+
+
+async def _enforce_limit(store: RedisStore, bucket: str, request: Request, maximum: int, cost: int = 1) -> None:
+    # TestClient and Docker both supply client.host; a reverse proxy can be added later if deployed publicly.
+    client_ip = request.client.host if request.client else "unknown"
+    result = await store.limit(bucket, client_ip, maximum, cost)
+    if not result.allowed:
+        raise HTTPException(status_code=429, detail="Rate limit exceeded. Try again shortly.", headers={"Retry-After": str(result.retry_after)})
 
 
 @router.post("/jobs/demo-batch", response_model=JobCreated, status_code=status.HTTP_202_ACCEPTED)

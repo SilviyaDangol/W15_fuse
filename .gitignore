@@ -4,5 +4,6 @@ __pycache__/
 *.py[cod]
 data/uploads/
 data/logs/
+# ChromaDB's local SQLite catalog and HNSW vector-index files are runtime data.
+data/chroma/
 tests/
-

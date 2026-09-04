@@ -1,4 +1,102 @@
-# Document Research Assistant
+# Task 2 — Production Document Research Assistant
+
+## Run the complete application
+
+1. Copy `.env.example` to `.env`, then add `OPENAI_API_KEY`. Keep the existing
+   vLLM values only when you want the optional vLLM route.
+2. Start the production-shaped local stack:
+
+   ```bash
+   docker compose up --build
+   ```
+
+3. Open the Streamlit UI at <http://localhost:8501>.
+
+   - Choose **OpenAI** for the tool-calling demonstration, or **vLLM** for the
+     Colab/local open-source model route.
+   - Upload a document in the sidebar and select **Queue document**.
+   - Select **Check indexing status** until it reports `indexed`.
+   - Ask a question. The answer panel shows verified sources plus provider,
+     cache, fallback, and latency metadata.
+
+   API Swagger is at <http://localhost:8080/docs>; readiness is
+   <http://localhost:8080/api/health/ready>.
+4. Stop it with `docker compose down`.
+
+The browser only calls FastAPI. FastAPI owns retrieval, verified ChromaDB
+citations, LiteLLM routing, retries, rate limits, Redis caching, and the
+vLLM-to-OpenAI fallback policy.
+
+### Production techniques implemented
+
+- `POST /api/chat`: `allow_fallback: true` is opt-in and only permits
+  `vllm → openai`; OpenAI never falls back to vLLM. Responses show requested
+  and actual provider, cache/fallback status, and latency.
+- `POST /api/chat/batch`: accepts 1–10 requests and limits active model calls
+  to 3. Each result is returned independently, so one unavailable provider
+  does not discard the other answers.
+- Redis provides a 10-minute successful-answer cache and fixed-window limits:
+  20 chat requests/minute/IP and 10 uploads/minute/IP. Indexing increments a
+  collection version, so old RAG answers are automatically bypassed.
+- Provider attempts use up to three attempts with exponential backoff before a
+  user-enabled vLLM fallback. Failures return safe `429`, `503`, or `502`
+  messages without provider secrets or stack traces.
+
+### Streamlit UI behavior
+
+The Streamlit service is intentionally a presentation layer, not an LLM
+client. Its only backend address is `API_BASE_URL=http://api:8080` inside
+Docker Compose. This keeps keys, retry logic, cache behavior, and citation
+validation on the server.
+
+| UI control | FastAPI action | What it demonstrates |
+| --- | --- | --- |
+| Provider selector | `POST /api/chat` with `provider` | Hosted OpenAI or locally/Colab-served vLLM routing |
+| Fallback toggle | `allow_fallback: true` | Controlled vLLM → OpenAI graceful degradation |
+| Document upload | `POST /api/documents/ingest` | Asynchronous Celery extraction, chunking, embedding, and indexing |
+| Job-status button | `GET /api/jobs/{job_id}` | Non-blocking background processing |
+| Chat input | `POST /api/chat` | RAG answer, verified ChromaDB citations, cache/fallback/latency status |
+
+### Architecture
+
+```mermaid
+flowchart LR
+  User[User browser] --> UI[Streamlit UI :8501]
+  UI -->|HTTP only| API[FastAPI API :8080]
+  subgraph API_PROCESS[FastAPI application]
+    API --> Limit[Redis fixed-window rate limiter]
+    API --> Cache[Redis response cache]
+    API --> Chat[Chat service]
+    Chat --> RAG[RAG retrieval + verified citations]
+    Chat --> Retry[3 attempts + exponential backoff]
+    Retry --> Gateway[LiteLLM gateway]
+    API --> Batch[Batch endpoint<br/>maximum 3 active calls]
+    API --> Queue[Celery job queue]
+  end
+  RAG --> Chroma[(ChromaDB vector collection)]
+  Gateway --> OpenAI[OpenAI<br/>chat, tool calls, embeddings]
+  Gateway --> VLLM[vLLM<br/>local or Colab/ngrok]
+  Retry -->|only if vLLM fails and toggle enabled| OpenAI
+  Queue --> Worker[Celery worker]
+  Worker --> Chunk[extract + chunk + embed]
+  Chunk --> Chroma
+  Worker -->|increment collection version| Cache
+  Redis[(Redis)] --- Limit
+  Redis --- Cache
+  Redis --- Queue
+```
+
+### ONNX decision
+
+ONNX conversion is not applicable here: this project does not own or train the
+deployed model. OpenAI is hosted, while Qwen is served by vLLM; vLLM already
+provides the relevant serving, continuous batching, and inference optimization.
+Docker Compose is the intended deployment target; cloud deployment is outside
+this assignment scope.
+
+---
+
+# Task 1 reference — Document Research Assistant
 
 A provider-agnostic AI assistant built incrementally for the Applied AI problem
 set. It uses LiteLLM as one provider-neutral client for OpenAI and vLLM, with
@@ -74,7 +172,7 @@ You never set `LLM_PROVIDER` or restart the app just to switch models. Use
 URL changes when Colab restarts, so update only `VLLM_BASE_URL` after a new
 tunnel is created.
 
-## Architecture
+## Task 1 architecture (reference)
 
 ```mermaid
 flowchart LR
