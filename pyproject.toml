@@ -1,0 +1,35 @@
+[project]
+name = "rag-assistant"
+version = "0.1.0"
+description = "A provider-agnostic RAG assistant with async and batch processing."
+requires-python = ">=3.11"
+dependencies = [
+  "celery[redis]>=5.4,<6",
+  "chromadb>=1.0,<2",
+  "fastapi>=0.115,<1",
+  "litellm==1.99.0",
+  "openai>=2.20,<3",
+  "pydantic-settings>=2.6,<3",
+  "python-multipart>=0.0.18,<1",
+  "python-docx>=1.1,<2",
+  "pypdf>=5,<7",
+  "redis>=5.2,<6",
+  "uvicorn[standard]>=0.32,<1",
+]
+
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[project.optional-dependencies]
+dev = [
+  "httpx>=0.28,<1",
+  "pytest>=8.3,<9",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
